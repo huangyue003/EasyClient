@@ -9,8 +9,8 @@ public class ChannelTests
     {
         public Action<byte[]>? OnSend;
         public void Deliver(params byte[] data) => ReceiveData(data);
-        public override void Send(ReadOnlyMemory<byte> data) => OnSend?.Invoke(data.ToArray());
-        public override ValueTask SendAsync(ReadOnlyMemory<byte> data) { Send(data); return ValueTask.CompletedTask; }
+
+        protected override ValueTask SendCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken) { cancellationToken.ThrowIfCancellationRequested(); OnSend?.Invoke(data.ToArray()); return ValueTask.CompletedTask; }
         public override Task CloseAsync() { EndPendingResponse(); return Task.CompletedTask; }
     }
 

@@ -1,6 +1,20 @@
 namespace IFactory.Interaction.EasyClient;
 internal static class ChannelOptions
 {
+    internal static void Validate(string text)
+    {
+        var uri = new Uri(text);
+        var options = Parse(uri);
+        if (uri.Scheme == "sio") { _ = new SerialIOEndPoint(uri); return; }
+        if (uri.Scheme != "tcp" && uri.Scheme != "udp") throw new ArgumentException("Unsupported URI scheme.");
+        var local = System.Net.IPEndPoint.Parse(uri.Authority);
+        _ = PositiveInt(options, "ReceiceBuffer", 6144);
+        if (uri.Scheme == "udp")
+        {
+            if (!options.TryGetValue("RemoteEndPoint", out var value) || !System.Net.IPEndPoint.TryParse(value, out var remote) || remote.AddressFamily != local.AddressFamily)
+                throw new ArgumentException("Invalid RemoteEndPoint.");
+        }
+    }
     internal static Dictionary<string, string> Parse(Uri uri)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

@@ -47,8 +47,9 @@ public class TcpClientChannel : ChannelBase
                     ReceiveData(buffer.AsSpan(0, count));
                 }
             }
-            catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException)
+            catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException or IOException)
             {
+                if (!_cts.IsCancellationRequested) RecordError(ex);
                 if (!_cts.IsCancellationRequested) logger?.LogError(ex, "TCP connection failed: {Uri}", Uri);
             }
             finally
@@ -58,6 +59,7 @@ public class TcpClientChannel : ChannelBase
                     if (ReferenceEquals(_socket, socket)) _socket = null;
                     IsConnected = false;
                 }
+                ClearCallbacks();
                 EndPendingResponse(new IOException("TCP connection closed."));
                 ArrayPool<byte>.Shared.Return(buffer);
             }
@@ -69,6 +71,7 @@ public class TcpClientChannel : ChannelBase
 
     public override async Task CloseAsync()
     {
+        StopCallbacks();
         _cts.Cancel();
         lock (_socketGate)
         {
@@ -80,9 +83,10 @@ public class TcpClientChannel : ChannelBase
         await _connectionTask.ConfigureAwait(false);
     }
 
-    public override async ValueTask SendAsync(ReadOnlyMemory<byte> data)
+    protected override async ValueTask SendCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
-        await _sendGate.WaitAsync().ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+        linked.Token.ThrowIfCancellationRequested();
         Socket? socket = null;
         try
         {
@@ -90,7 +94,7 @@ public class TcpClientChannel : ChannelBase
             if (socket == null) throw new InvalidOperationException("TCP is not connected.");
             while (!data.IsEmpty)
             {
-                int sent = await socket.SendAsync(data, SocketFlags.None, _cts.Token).ConfigureAwait(false);
+                int sent = await socket.SendAsync(data, SocketFlags.None, linked.Token).ConfigureAwait(false);
                 if (sent == 0) throw new IOException("TCP send returned zero bytes.");
                 data = data[sent..];
             }
@@ -100,8 +104,8 @@ public class TcpClientChannel : ChannelBase
             socket?.Dispose();
             throw;
         }
-        finally { _sendGate.Release(); }
+
     }
 
-    public override void Send(ReadOnlyMemory<byte> data) => SendAsync(data).AsTask().GetAwaiter().GetResult();
+
 }

@@ -34,19 +34,21 @@ public class UdpChannel : ChannelBase
     }
     private async Task ReceiveLoopAsync()
     {
-        var buffer = ArrayPool<byte>.Shared.Rent(_bufferSize);
+        var buffer = ArrayPool<byte>.Shared.Rent(65536);
         try
         {
             while (!_cts.IsCancellationRequested)
             {
-                var result = await _socket.ReceiveFromAsync(buffer.AsMemory(0, _bufferSize), SocketFlags.None, _remote, _cts.Token).ConfigureAwait(false);
-                if (result.RemoteEndPoint.Equals(_remote)) ReceiveData(buffer.AsSpan(0, result.ReceivedBytes));
+                var result = await _socket.ReceiveFromAsync(buffer.AsMemory(0, 65536), SocketFlags.None, _remote, _cts.Token).ConfigureAwait(false);
+                if (result.ReceivedBytes > _bufferSize) { logger?.LogWarning("Oversized UDP datagram dropped: {Size}", result.ReceivedBytes); continue; }
+                if (result.RemoteEndPoint.Equals(_remote)) ReceiveData(buffer.AsSpan(0, result.ReceivedBytes), datagram: true);
             }
         }
         catch (Exception ex)
         {
             if (!_cts.IsCancellationRequested)
             {
+                RecordError(ex);
                 logger?.LogError(ex, "UDP receive failed: {Uri}", Uri);
                 EndPendingResponse(ex);
             }
@@ -54,6 +56,7 @@ public class UdpChannel : ChannelBase
         finally
         {
             IsConnected = false;
+            StopCallbacks();
             IsClosed = true;
             _socket.Dispose();
             EndPendingResponse(new IOException("UDP channel closed."));
@@ -62,6 +65,7 @@ public class UdpChannel : ChannelBase
     }
     public override async Task CloseAsync()
     {
+        StopCallbacks();
         IsClosed = true;
         IsConnected = false;
         EndPendingResponse(new ObjectDisposedException(nameof(UdpChannel)));
@@ -69,14 +73,10 @@ public class UdpChannel : ChannelBase
         _socket.Dispose();
         await _receiveTask.ConfigureAwait(false);
     }
-    public override async ValueTask SendAsync(ReadOnlyMemory<byte> data)
+    protected override async ValueTask SendCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
         if (IsClosed) throw new ObjectDisposedException(nameof(UdpChannel));
-        await _socket.SendToAsync(data, SocketFlags.None, _remote, _cts.Token).ConfigureAwait(false);
-    }
-    public override void Send(ReadOnlyMemory<byte> data)
-    {
-        if (IsClosed) throw new ObjectDisposedException(nameof(UdpChannel));
-        _socket.SendTo(data.Span, SocketFlags.None, _remote);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+        await _socket.SendToAsync(data, SocketFlags.None, _remote, linked.Token).ConfigureAwait(false);
     }
 }

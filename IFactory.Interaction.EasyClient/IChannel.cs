@@ -15,6 +15,8 @@ namespace IFactory.Interaction.EasyClient
         bool IsConnected { get; set; }
 
         ValueTask SendAsync(ReadOnlyMemory<byte> data);
+        ValueTask SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
+        Task<List<byte>> SendReceiveAsync(ReadOnlyMemory<byte> data, int millisecondsTimeout, int expectReceiveLength, CancellationToken cancellationToken);
         ValueTask SendAsync(string data);
         Task<List<byte>> SendReceiveAsync(ReadOnlyMemory<byte> data, int millisecondsTimeout, int expectReceiveLength);
         Task<string> SendReceiveAsync(string data, int millisecondsTimeout, int expectReceiveLength);
