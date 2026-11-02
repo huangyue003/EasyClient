@@ -15,11 +15,11 @@ namespace IFactory.Interaction.EasyClient
             SetChannel(_channelCreator.CreateChannel(uri));
         }
         IChannelCreator _channelCreator = new ChannelCreator();
-        public IChannel Channel { get; private set; }
+        public IChannel Channel { get; private set; } = null!;
         public Action<List<byte>>? DataReceiceHandler { get; set; }
         public void OnDataReceived(List<byte> data)
         {
-            Task.Run(() => { DataReceiceHandler?.Invoke(data); });
+            DataReceiceHandler?.Invoke(data);
         }
         public string Uri { get; private set; }
 
@@ -53,8 +53,9 @@ namespace IFactory.Interaction.EasyClient
         {
             //if (Uri.Equals(uri))
             //    return;
-            await Channel.CloseAsync();
-            Thread.Sleep(300);
+            Channel.DataReceiceHandler -= OnDataReceived;
+            await Channel.CloseAsync().ConfigureAwait(false);
+            await Task.Delay(300).ConfigureAwait(false);
             if (!string.IsNullOrEmpty(uri))
                 Uri = uri;
             SetChannel(_channelCreator.CreateChannel(Uri));

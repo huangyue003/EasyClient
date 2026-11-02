@@ -1,102 +1,112 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
-using System.Buffers;
 
-namespace IFactory.Interaction.EasyClient
+namespace IFactory.Interaction.EasyClient;
+
+public abstract class ChannelBase : IChannel
 {
-    public abstract class ChannelBase : IChannel
+    public string Uri { get; set; } = "";
+    public bool IsClosed { get; set; } = true;
+    public bool IsConnected { get; set; }
+    protected ILogger? logger;
+    public ILogger? Logger { get => logger; set => logger = value; }
+    private readonly object _receiveGate = new();
+    private readonly SemaphoreSlim _requestGate = new(1, 1);
+    private PendingResponse? _pending;
+    public Action<List<byte>>? DataReceiceHandler { get; set; }
+
+    private sealed class PendingResponse(int length)
     {
-        public string Uri { get; set; }
-        public bool IsClosed { get; set; } = true;
-        protected ILogger? logger;
-        protected AutoResetEvent AutoResetEvent { get; set; } = new AutoResetEvent(false);
-        protected bool IsWaitingReceice = false;
-        protected List<byte> receiveBuffer = new List<byte>();
-        protected int _expectReceiveLength = 0;
-        protected int _millisecondsTimeout = 100;
-        private SemaphoreSlim _sendReceiveLock = new SemaphoreSlim(1);
-        public bool IsConnected { get; set; } = false;
-        public Action<List<byte>>? DataReceiceHandler { get; set; }
+        public readonly int Length = length;
+        public readonly List<byte> Buffer = new();
+        public readonly TaskCompletionSource<List<byte>> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
-        private List<byte> Receive(int millisecondsTimeout, int expectReceiveLength)
+    // Copy before returning pooled transport buffers. All response state belongs to this lock.
+    protected void ReceiveData(ReadOnlySpan<byte> data)
+    {
+        List<byte>? unsolicited = null;
+        lock (_receiveGate)
         {
-            IsWaitingReceice = true;
-            _expectReceiveLength = expectReceiveLength;
-            _millisecondsTimeout = millisecondsTimeout;
-            AutoResetEvent.WaitOne(millisecondsTimeout);
-            IsWaitingReceice = false;
-            return receiveBuffer.ToList();
-        }
-        public abstract Task CloseAsync();
-        public abstract void Send(ReadOnlyMemory<byte> data);
-        public void Send(string data)
-        {
-            var binaryData = Encoding.UTF8.GetBytes(data, 0, data.Length);
-            Send(binaryData);
-        }
-        public abstract ValueTask SendAsync(ReadOnlyMemory<byte> data);
-        public ValueTask SendAsync(string data)
-        {
-            var binaryData = Encoding.UTF8.GetBytes(data, 0, data.Length);
-            return SendAsync(binaryData);
-        }
-
-        public async Task<List<byte>> SendReceiveAsync(ReadOnlyMemory<byte> data, int millisecondsTimeout, int expectReceiveLength = 0)
-        {
-            try
+            if (_pending is { } pending)
             {
-                _sendReceiveLock.Wait();
-                receiveBuffer.Clear();
-                await SendAsync(data);
-                return Receive(millisecondsTimeout, expectReceiveLength);
+                int count = pending.Length > 0
+                    ? Math.Min(data.Length, pending.Length - pending.Buffer.Count) : data.Length;
+                pending.Buffer.AddRange(data[..count].ToArray());
+                if (pending.Length == 0 || pending.Buffer.Count >= pending.Length)
+                {
+                    _pending = null;
+                    pending.Completion.TrySetResult(pending.Buffer.ToList());
+                }
+                if (count < data.Length) unsolicited = data[count..].ToArray().ToList();
             }
-            catch (Exception ex)
-            {
-                logger?.LogError(ex, "Exception happened in SendReceiveAsync.");
-            }
-            finally
-            {
-                _sendReceiveLock.Release();
-            }
-            return new List<byte>();
+            else unsolicited = data.ToArray().ToList();
         }
-        public async Task<string> SendReceiveAsync(string data, int millisecondsTimeout, int expectReceiveLength)
+        if (unsolicited is { Count: > 0 })
         {
-            var binaryData = Encoding.UTF8.GetBytes(data, 0, data.Length);
-            var receive = await SendReceiveAsync(binaryData, millisecondsTimeout, expectReceiveLength);
-            return Encoding.UTF8.GetString(receive.ToArray());
-        }
-
-        public List<byte> SendReceive(ReadOnlyMemory<byte> data, int millisecondsTimeout, int expectReceiveLength)
-        {
-            try
+            var snapshot = unsolicited;
+            _ = Task.Run(() =>
             {
-                _sendReceiveLock.Wait();
-                receiveBuffer.Clear();
-                Send(data);
-                return Receive(millisecondsTimeout, expectReceiveLength);
-            }
-            catch (Exception ex)
-            {
-                logger?.LogError(ex, "Exception happened in SendReceiveAsync.");
-            }
-            finally
-            {
-                _sendReceiveLock.Release();
-            }
-            return new List<byte>();
-        }
-
-        public string SendReceive(string data, int millisecondsTimeout, int expectReceiveLength)
-        {
-            var binaryData = Encoding.UTF8.GetBytes(data, 0, data.Length);
-            var receive = SendReceive(binaryData, millisecondsTimeout, expectReceiveLength);
-            return Encoding.UTF8.GetString(receive.ToArray());
+                try { DataReceiceHandler?.Invoke(snapshot); }
+                catch (Exception ex) { logger?.LogError(ex, "Receive callback failed: {Uri}", Uri); }
+            });
         }
     }
+
+    protected void EndPendingResponse(Exception? error = null)
+    {
+        lock (_receiveGate)
+        {
+            if (_pending is { } pending)
+            {
+                _pending = null;
+                if (error is null) pending.Completion.TrySetResult(pending.Buffer.ToList()); else pending.Completion.TrySetException(error);
+            }
+        }
+    }
+
+    public abstract Task CloseAsync();
+    public abstract void Send(ReadOnlyMemory<byte> data);
+    public abstract ValueTask SendAsync(ReadOnlyMemory<byte> data);
+    public void Send(string data) => Send(Encoding.UTF8.GetBytes(data));
+    public ValueTask SendAsync(string data) => SendAsync(Encoding.UTF8.GetBytes(data));
+
+    public async Task<List<byte>> SendReceiveAsync(ReadOnlyMemory<byte> data, int millisecondsTimeout, int expectReceiveLength = 0)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(millisecondsTimeout, -1);
+        ArgumentOutOfRangeException.ThrowIfNegative(expectReceiveLength);
+        await _requestGate.WaitAsync().ConfigureAwait(false);
+        var pending = new PendingResponse(expectReceiveLength);
+        try
+        {
+            lock (_receiveGate) _pending = pending;
+            await SendAsync(data).ConfigureAwait(false);
+            try
+            {
+                return await pending.Completion.Task.WaitAsync(
+                    millisecondsTimeout == -1 ? Timeout.InfiniteTimeSpan : TimeSpan.FromMilliseconds(millisecondsTimeout)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                lock (_receiveGate)
+                {
+                    if (ReferenceEquals(_pending, pending)) _pending = null;
+                    throw new TimeoutException($"Response timed out after {millisecondsTimeout} ms; received {pending.Buffer.Count} bytes.");
+                }
+            }
+        }
+        finally
+        {
+            lock (_receiveGate)
+                if (ReferenceEquals(_pending, pending)) _pending = null;
+            _requestGate.Release();
+        }
+    }
+
+    public List<byte> SendReceive(ReadOnlyMemory<byte> data, int millisecondsTimeout, int expectReceiveLength)
+        => SendReceiveAsync(data, millisecondsTimeout, expectReceiveLength).GetAwaiter().GetResult();
+    public async Task<string> SendReceiveAsync(string data, int millisecondsTimeout, int expectReceiveLength)
+        => Encoding.UTF8.GetString((await SendReceiveAsync(Encoding.UTF8.GetBytes(data), millisecondsTimeout, expectReceiveLength).ConfigureAwait(false)).ToArray());
+    public string SendReceive(string data, int millisecondsTimeout, int expectReceiveLength)
+        => Encoding.UTF8.GetString(SendReceive(Encoding.UTF8.GetBytes(data), millisecondsTimeout, expectReceiveLength).ToArray());
 }
