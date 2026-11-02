@@ -1,26 +1,34 @@
 using System.Text;
 using Microsoft.Extensions.Logging;
 namespace IFactory.Interaction.EasyClient;
-public abstract class ChannelBase : IChannel
+public abstract class ChannelBase : IChannel, IAsyncDisposable
 {
-    public string Uri { get; set; } = "";
-    public bool IsClosed { get; set; } = true;
-    public bool IsConnected { get; set; }
-    protected ILogger? logger;
+    public string Uri { get; protected set; } = "";
+    public bool IsClosed { get; protected set; } = true;
+    public bool IsConnected { get; protected set; }
+
     public Exception? LastError { get; private set; }
-    protected void RecordError(Exception error) => LastError = error;
-    public ILogger? Logger { get => logger; set => logger = value; }
+    public DateTimeOffset? ErrorTimestamp { get; private set; }
+    protected void RecordError(Exception error) { LastError = error; ErrorTimestamp = DateTimeOffset.UtcNow; }
+    public ILogger? Logger { get; set; }
     private readonly object _receiveGate = new();
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private PendingResponse? _pending;
     private readonly Queue<(Action<List<byte>> Handler, List<byte> Data)> _callbacks = new();
+    internal const int MaxCallbackQueueDepth = 256;
+    internal const int MaxCallbackQueueBytes = 4 * 1024 * 1024;
+    public const int MaxResponseLength = 16 * 1024 * 1024;
+    private int _queuedBytes;
+    private long _droppedChunks, _droppedBytes;
+    public long DroppedChunks => Interlocked.Read(ref _droppedChunks);
+    public long DroppedBytes => Interlocked.Read(ref _droppedBytes);
     private bool _dispatching;
     private bool _callbacksClosed;
     public Action<List<byte>>? DataReceiceHandler { get; set; }
     private sealed class PendingResponse(int length)
     {
         public readonly int Length = length;
-        public readonly List<byte> Buffer = new();
+        public readonly List<byte> Buffer = new(Math.Min(length, 64 * 1024));
         public readonly TaskCompletionSource<List<byte>> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
     protected void ReceiveData(ReadOnlySpan<byte> data, bool datagram = false)
@@ -39,18 +47,21 @@ public abstract class ChannelBase : IChannel
                     pending.Completion.TrySetResult(pending.Buffer);
                 }
             }
+            if ((count < data.Length || (datagram && data.IsEmpty && !hadPending)) && !_callbacksClosed && DataReceiceHandler == null)
+            { Interlocked.Increment(ref _droppedChunks); Interlocked.Add(ref _droppedBytes, data.Length - count); }
             if ((count < data.Length || (datagram && data.IsEmpty && !hadPending)) && !_callbacksClosed && DataReceiceHandler is { } handler)
             {
-                if (_callbacks.Count >= 256)
+                if (_callbacks.Count >= MaxCallbackQueueDepth || data.Length - count > MaxCallbackQueueBytes - _queuedBytes)
                 {
                     var error = new IOException("Receive callback queue overflow; connection must be reset.");
                     RecordError(error);
-                    _callbacks.Clear();
+                    _callbacks.Clear(); _queuedBytes = 0;
                     throw error;
                 }
                 var snapshot = new List<byte>(data.Length - count);
                 snapshot.AddRange(data[count..]);
                 _callbacks.Enqueue((handler, snapshot));
+                _queuedBytes += snapshot.Count;
                 if (!_dispatching) { _dispatching = true; _ = Task.Run(DispatchCallbacks); }
             }
         }
@@ -64,29 +75,31 @@ public abstract class ChannelBase : IChannel
             {
                 if (_callbacks.Count == 0) { _dispatching = false; return; }
                 item = _callbacks.Dequeue();
+                _queuedBytes -= item.Data.Count;
             }
             try { item.Handler(item.Data); }
-            catch (Exception ex) { logger?.LogError(ex, "Receive callback failed: {Uri}", Uri); }
+            catch (Exception ex) { Logger?.LogError(ex, "Receive callback failed: {Uri}", Uri); }
         }
     }
     protected void ClearCallbacks()
     {
-        lock (_receiveGate) _callbacks.Clear();
+        lock (_receiveGate) { _callbacks.Clear(); _queuedBytes = 0; }
     }
     protected void StopCallbacks()
     {
-        lock (_receiveGate) { _callbacksClosed = true; _callbacks.Clear(); }
+        lock (_receiveGate) { _callbacksClosed = true; _callbacks.Clear(); _queuedBytes = 0; }
     }
-    protected void EndPendingResponse(Exception? error = null)
+    protected void FailPendingResponse(Exception error)
     {
+        ArgumentNullException.ThrowIfNull(error);
         lock (_receiveGate)
         {
             if (_pending is not { } pending) return;
             _pending = null;
-            if (error == null) pending.Completion.TrySetResult(pending.Buffer);
-            else pending.Completion.TrySetException(error);
+            pending.Completion.TrySetException(error);
         }
     }
+    public ValueTask DisposeAsync() => new(CloseAsync());
     public abstract Task CloseAsync();
     protected abstract ValueTask SendCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
     public void Send(ReadOnlyMemory<byte> data) => SendAsync(data).AsTask().GetAwaiter().GetResult();
@@ -105,6 +118,7 @@ public abstract class ChannelBase : IChannel
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(millisecondsTimeout, -1);
         ArgumentOutOfRangeException.ThrowIfNegative(expectReceiveLength);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(expectReceiveLength, MaxResponseLength);
         using var deadline = millisecondsTimeout >= 0 ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken) : null;
         deadline?.CancelAfter(millisecondsTimeout);
         var token = deadline?.Token ?? cancellationToken;

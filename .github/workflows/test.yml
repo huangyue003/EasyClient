@@ -1,0 +1,17 @@
+name: Build and test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore IFactory.Interaction.EasyClient.slnx
+      - run: dotnet build IFactory.Interaction.EasyClient.slnx -c Release --no-restore -warnaserror
+      - run: dotnet test IFactory.Interaction.EasyClient.slnx -c Release --no-build --filter "Category!=SerialIntegration" --collect:"XPlat Code Coverage" --results-directory TestResults/coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: TestResults/coverage/**/coverage.cobertura.xml

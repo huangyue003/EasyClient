@@ -11,7 +11,7 @@ public class ChannelTests
         public void Deliver(params byte[] data) => ReceiveData(data);
 
         protected override ValueTask SendCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken) { cancellationToken.ThrowIfCancellationRequested(); OnSend?.Invoke(data.ToArray()); return ValueTask.CompletedTask; }
-        public override Task CloseAsync() { EndPendingResponse(); return Task.CompletedTask; }
+        public override Task CloseAsync() { FailPendingResponse(new ObjectDisposedException("Channel")); return Task.CompletedTask; }
     }
 
     [Fact]

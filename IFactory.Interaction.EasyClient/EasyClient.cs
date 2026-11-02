@@ -7,12 +7,13 @@ using System.Buffers;
 
 namespace IFactory.Interaction.EasyClient
 {
-    public class EasyClient : IEasyClient
+    public class EasyClient : IEasyClient, IAsyncDisposable
     {
         public EasyClient(string uri) : this(uri, new ChannelCreator()) { }
         public EasyClient(string uri, IChannelCreator channelCreator)
         {
             _channelCreator = channelCreator ?? throw new ArgumentNullException(nameof(channelCreator));
+            _channelCreator.Validate(uri);
             Uri = uri;
             SetChannel(_channelCreator.CreateChannel(uri));
         }
@@ -44,26 +45,28 @@ namespace IFactory.Interaction.EasyClient
             }
             finally { _lifecycleGate.Release(); }
         }
+        private IChannel ActiveChannel { get { ObjectDisposedException.ThrowIf(Volatile.Read(ref _closed) != 0, this); return Channel; } }
+        public ValueTask DisposeAsync() => new(CloseAsync());
         public ValueTask SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
-            => Channel.SendAsync(data, cancellationToken);
+            => ActiveChannel.SendAsync(data, cancellationToken);
         public Task<List<byte>> SendReceiveAsync(ReadOnlyMemory<byte> data, int millisecondsTimeout, int expectReceiveLength = 0, CancellationToken cancellationToken = default)
-            => Channel.SendReceiveAsync(data, millisecondsTimeout, expectReceiveLength, cancellationToken);
-        public void Send(ReadOnlyMemory<byte> data) => Channel.Send(data);
-        public ValueTask SendAsync(List<byte> data) => Channel.SendAsync(new ReadOnlyMemory<byte>(data.ToArray()));
-        public ValueTask SendAsync(string data) => Channel.SendAsync(data);
-        public void Send(List<byte> data) => Channel.Send(new ReadOnlyMemory<byte>(data.ToArray()));
-        public void Send(string data) => Channel.Send(data);
+            => ActiveChannel.SendReceiveAsync(data, millisecondsTimeout, expectReceiveLength, cancellationToken);
+        public void Send(ReadOnlyMemory<byte> data) => ActiveChannel.Send(data);
+        public ValueTask SendAsync(List<byte> data) => ActiveChannel.SendAsync(new ReadOnlyMemory<byte>(data.ToArray()));
+        public ValueTask SendAsync(string data) => ActiveChannel.SendAsync(data);
+        public void Send(List<byte> data) => ActiveChannel.Send(new ReadOnlyMemory<byte>(data.ToArray()));
+        public void Send(string data) => ActiveChannel.Send(data);
 
         public Task<List<byte>> SendReceiveAsync(List<byte> data, int millisecondsTimeout, int expectReceiveLength = 0)
-        => Channel.SendReceiveAsync(new ReadOnlyMemory<byte>(data.ToArray()), millisecondsTimeout, expectReceiveLength);
+        => ActiveChannel.SendReceiveAsync(new ReadOnlyMemory<byte>(data.ToArray()), millisecondsTimeout, expectReceiveLength);
         public Task<string> SendReceiveAsync(string data, int millisecondsTimeout, int expectReceiveLength = 0)
-        => Channel.SendReceiveAsync(data, millisecondsTimeout, expectReceiveLength);
+        => ActiveChannel.SendReceiveAsync(data, millisecondsTimeout, expectReceiveLength);
 
         public List<byte> SendReceive(List<byte> data, int millisecondsTimeout, int expectReceiveLength = 0)
-       => Channel.SendReceive(new ReadOnlyMemory<byte>(data.ToArray()), millisecondsTimeout, expectReceiveLength);
+       => ActiveChannel.SendReceive(new ReadOnlyMemory<byte>(data.ToArray()), millisecondsTimeout, expectReceiveLength);
 
         public string SendReceive(string data, int millisecondsTimeout, int expectReceiveLength = 0)
-        => Channel.SendReceive(data, millisecondsTimeout, expectReceiveLength);
+        => ActiveChannel.SendReceive(data, millisecondsTimeout, expectReceiveLength);
 
         public async Task ResetChannelAsync(string uri = "")
         {
@@ -72,7 +75,7 @@ namespace IFactory.Interaction.EasyClient
             {
                 ObjectDisposedException.ThrowIf(Volatile.Read(ref _closed) != 0, this);
                 string nextUri = string.IsNullOrEmpty(uri) ? Uri : uri;
-                if (_channelCreator is ChannelCreator) ChannelOptions.Validate(nextUri);
+                _channelCreator.Validate(nextUri);
                 Channel.DataReceiceHandler -= OnDataReceived;
                 await Channel.CloseAsync().ConfigureAwait(false);
                 ObjectDisposedException.ThrowIf(Volatile.Read(ref _closed) != 0, this);

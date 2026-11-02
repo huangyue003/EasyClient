@@ -9,5 +9,6 @@ namespace IFactory.Interaction.EasyClient
     public  interface IChannelCreator
     {
         IChannel CreateChannel(string uri);
+        void Validate(string uri) { }
     }
 }

@@ -9,7 +9,7 @@ public class SchedulingTests
         public void Deliver(params byte[] bytes) => ReceiveData(bytes);
         protected override ValueTask SendCoreAsync(ReadOnlyMemory<byte> data, CancellationToken token)
             => Sender?.Invoke(data, token) ?? ValueTask.CompletedTask;
-        public override Task CloseAsync() { StopCallbacks(); EndPendingResponse(new ObjectDisposedException("Probe")); return Task.CompletedTask; }
+        public override Task CloseAsync() { StopCallbacks(); FailPendingResponse(new ObjectDisposedException("Probe")); return Task.CompletedTask; }
     }
     [Fact]
     public async Task OrdinarySendWaitsForRequestAndQueuedCancellationWorks()

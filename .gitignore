@@ -46,3 +46,6 @@ Thumbs.db
 # Private key material
 *.key
 *.pem
+
+# Local WorkBuddy memory and agent state
+.workbuddy/

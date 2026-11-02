@@ -46,6 +46,38 @@ public class SerialIntegrationTests
     }
 
     [VirtualSerialFact]
+    public async Task CancellationBeforeAndAfterWriteKeepsRealPortUsable()
+    {
+        var a = Open(PortA);
+        try
+        {
+            var b = Open(PortB);
+            try
+            {
+                var received = Capture(b);
+                using (var cancelled = new CancellationTokenSource())
+                {
+                    cancelled.Cancel();
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => a.SendAsync(new byte[] { 99 }, cancelled.Token).AsTask());
+                    Assert.False(a.IsClosed);
+                }
+                for (int i = 0; i < 20; i++)
+                {
+                    using var completed = new CancellationTokenSource();
+                    await a.SendAsync(new byte[] { (byte)i }, completed.Token);
+                    completed.Cancel();
+                    Assert.Equal(new byte[] { (byte)i }, await Read(received, 1));
+                    Assert.True(a.IsConnected);
+                    Assert.False(a.IsClosed);
+                }
+                await a.CloseAsync();
+                await Assert.ThrowsAsync<ObjectDisposedException>(() => a.SendAsync(new byte[] { 1 }).AsTask());
+            }
+            finally { await Close(b); }
+        }
+        finally { await Close(a); }
+    }
+    [VirtualSerialFact]
     public async Task RealClientResetReopensWithoutTestCleanupDelay()
     {
         var client = new EasyClient($"sio://{PortA}/?BaudRate=115200");

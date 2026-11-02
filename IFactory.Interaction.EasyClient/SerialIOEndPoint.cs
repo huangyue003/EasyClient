@@ -8,6 +8,8 @@ public interface ISerialIOEndPoint
     Parity Parity { get; set; }
     StopBits StopBits { get; set; }
     bool RtsEnable { get; set; }
+    bool DtrEnable { get => false; set { } }
+    int WirteTimeout { get => -1; set { } }
 }
 public class SerialIOEndPoint : ISerialIOEndPoint
 {
@@ -20,7 +22,7 @@ public class SerialIOEndPoint : ISerialIOEndPoint
     public bool DtrEnable { get; set; }
     public int WirteTimeout { get; set; } = -1;
     public SerialIOEndPoint() { }
-    public SerialIOEndPoint(string uri) : this(new Uri(uri)) { }
+    public SerialIOEndPoint(string uri) : this(ChannelOptions.Address(uri)) { }
     public SerialIOEndPoint(Uri uri)
     {
         var query = ChannelOptions.Parse(uri);

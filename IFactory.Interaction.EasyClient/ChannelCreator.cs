@@ -8,17 +8,19 @@ namespace IFactory.Interaction.EasyClient
 {
     public class ChannelCreator : IChannelCreator
     {
+        public void Validate(string uri) => ChannelOptions.Validate(uri);
         public IChannel CreateChannel(string uri)
         {
-            var _uri = new Uri(uri);
+            Validate(uri);
+            var _uri = ChannelOptions.Address(uri);
             switch (_uri.Scheme)
             {
                 case "sio":
-                    return new SioChannelCreator().CreateChannel(uri);
+                    return new SerialIOChannel(uri);
                 case "udp":
-                    return new UdpChannelCreator().CreateChannel(uri);
+                    return new UdpChannel(uri);
                 case "tcp":
-                    return new TcpChannelCreator().CreateChannel(uri);
+                    return new TcpClientChannel(uri);
                 default:
                     throw new ArgumentException($"uri is incorrect.uri{uri} ");
             }

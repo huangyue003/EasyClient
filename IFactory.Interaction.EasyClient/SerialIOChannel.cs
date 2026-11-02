@@ -7,11 +7,13 @@ public class SerialIOChannel : ChannelBase
     private readonly SerialPort serialIO;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _receiveTask;
+    private readonly int _writeTimeout;
     public SerialIOEndPoint SioEndPoint { get; set; }
     public SerialIOChannel(string uri)
     {
         Uri = uri;
         SioEndPoint = new SerialIOEndPoint(uri);
+        _writeTimeout = SioEndPoint.WirteTimeout;
         serialIO = new SerialPort(SioEndPoint.PortName, SioEndPoint.BaudRate, SioEndPoint.Parity, SioEndPoint.Databits, SioEndPoint.StopBits)
         {
             RtsEnable = SioEndPoint.RtsEnable,
@@ -42,8 +44,8 @@ public class SerialIOChannel : ChannelBase
             if (!_cts.IsCancellationRequested)
             {
                 RecordError(ex);
-                logger?.LogError(ex, "Serial receive failed: {Uri}", Uri);
-                EndPendingResponse(ex);
+                Logger?.LogError(ex, "Serial receive failed: {Uri}", Uri);
+                FailPendingResponse(ex);
             }
         }
         finally
@@ -52,36 +54,32 @@ public class SerialIOChannel : ChannelBase
             StopCallbacks();
             IsClosed = true;
             serialIO.Dispose();
-            EndPendingResponse(new IOException("Serial connection closed."));
+            FailPendingResponse(new IOException("Serial connection closed."));
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
     protected override async ValueTask SendCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
-        if (IsClosed || !IsConnected || !serialIO.IsOpen) throw new InvalidOperationException("Serial port is closed.");
+        ObjectDisposedException.ThrowIf(IsClosed, this);
+        if (!IsConnected) throw new InvalidOperationException("Serial port is not connected.");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-        if (SioEndPoint.WirteTimeout > 0) linked.CancelAfter(SioEndPoint.WirteTimeout);
-        // Abort the native handle as well: not every serial driver honors async cancellation.
-        using var abort = linked.Token.Register(() =>
+        if (_writeTimeout > 0) linked.CancelAfter(_writeTimeout);
+        try
         {
-            IsClosed = true;
-            IsConnected = false;
-            serialIO.Dispose();
-        });
-        try { await serialIO.BaseStream.WriteAsync(data, linked.Token).ConfigureAwait(false); }
-        catch (Exception) when (linked.IsCancellationRequested)
-        {
-            if (!cancellationToken.IsCancellationRequested && !_cts.IsCancellationRequested)
-                throw new TimeoutException("Serial write timed out; port closed to abort the write.");
-            throw new OperationCanceledException(linked.Token);
+            await SerialWriteOperation.RunAsync(
+                () => serialIO.BaseStream.WriteAsync(data, linked.Token).AsTask(),
+                () => { IsClosed = true; IsConnected = false; serialIO.Dispose(); },
+                linked.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && !_cts.IsCancellationRequested)
+        { throw new TimeoutException("Serial write timed out; reset the port if it was aborted."); }
     }
     public override async Task CloseAsync()
     {
         StopCallbacks();
         IsClosed = true;
         IsConnected = false;
-        EndPendingResponse(new ObjectDisposedException(nameof(SerialIOChannel)));
+        FailPendingResponse(new ObjectDisposedException(nameof(SerialIOChannel)));
         _cts.Cancel();
         serialIO.Dispose();
         await _receiveTask.ConfigureAwait(false);
