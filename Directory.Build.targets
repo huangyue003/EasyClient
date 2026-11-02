@@ -1,0 +1,11 @@
+<Project>
+  <!-- Imported after project items, so Update can match existing PackageReferences. -->
+  <ItemGroup>
+    <PackageReference Update="Microsoft.Extensions.Logging.Abstractions" Version="$(LoggingAbstractionsVersion)" />
+    <PackageReference Update="System.IO.Ports" Version="$(SystemIOPortsVersion)" />
+    <PackageReference Update="coverlet.collector" Version="$(CoverletCollectorVersion)" />
+    <PackageReference Update="Microsoft.NET.Test.Sdk" Version="$(MicrosoftNETTestSdkVersion)" />
+    <PackageReference Update="xunit" Version="$(XunitVersion)" />
+    <PackageReference Update="xunit.runner.visualstudio" Version="$(XunitVisualStudioRunnerVersion)" />
+  </ItemGroup>
+</Project>

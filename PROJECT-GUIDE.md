@@ -191,7 +191,7 @@ await client.CloseAsync();                       // 此后不能 Reset 或发送
 
 ## 7. 构建、测试和常见问题
 
-需要 .NET 10 SDK。本轮仅升级 TFM，System.IO.Ports 6.0.0 与 Logging.Abstractions 5.0.0 暂未升级，避免把依赖行为变化混入迁移。
+需要 .NET 10 SDK。目标框架和 NuGet 版本集中在 Directory.Build.props 管理；Directory.Build.targets 在项目引用定义后应用 PackageReference Update。System.IO.Ports 与 Logging.Abstractions 已升级至 10.0.14，并通过全套回归测试。
 
 ```powershell
 dotnet restore IFactory.Interaction.EasyClient.slnx
@@ -218,3 +218,12 @@ Remove-Item Env:EASYCLIENT_SERIAL_TESTS
 | 大量主动数据后断线 | 回调是否过慢、是否达到队列块数或字节限制 |
 
 更多测试数据、已覆盖场景和仍需验证的硬件路径见 TEST-COVERAGE.md。历史交接文件保留供追溯，不作为当前 TFM 或行为的唯一依据。
+
+
+## 集中构建与 NuGet 版本
+
+`Directory.Build.props` 保存 `TargetFramework=net10.0`、语言版本和各 NuGet 版本属性。`Directory.Build.targets` 在项目的 PackageReference 声明完成后用 Update 应用版本；项目 csproj 只声明包名及项目特有元数据。不要把 Update 直接放在过早导入的 props 顶层。
+
+2026-11-02 查询 NuGet 最新稳定版并验证：Logging.Abstractions / System.IO.Ports 10.0.14，coverlet.collector 10.1.0，Microsoft.NET.Test.Sdk 18.11.0，xunit 2.9.3，xunit.runner.visualstudio 4.0.1。xunit 包名和框架保持 v2，不自动迁移到另一包名的 v3。
+
+检查更新：`dotnet list IFactory.Interaction.EasyClient.slnx package --outdated`。修改版本后执行 restore、零警告构建及完整测试，串口相关依赖需启用 VSPD 测试。固定版本便于复现，不使用浮动版本。
